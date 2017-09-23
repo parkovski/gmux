@@ -57,121 +57,6 @@ BOOL FindShellWindows(HWND hWnd, LPARAM lParam) {
   return true;
 }
 
-/*
-class CommandMap {
-  int leader;
-  // (key, position) -> [command]
-  // key == 0 for end.
-  std::unordered_map<std::tuple<int, int>, std::set<int>> key_index;
-  mutable bool in_command;
-  mutable std::set<int> lookup_commands;
-  mutable int lookup_position;
-
-public:
-  static const int CONTROL = 0x00100000;
-  static const int SHIFT = 0x00200000;
-  static const int ALT = 0x00400000;
-  static const int WIN = 0x00800000;
-  static const int MASK = 0x00F00000;
-
-  /// Format: %C = Control, %S = Shift, %A = Alt, %W = Win, %% = %.
-  void add(const char *command, size_t length, int command_index) {
-    int position = 0;
-    int key_position = 0;
-    while (position < length) {
-      int key = 0;
-      while (position < length + 1 && command[position] == '%') {
-        ++position;
-        switch (command[position]) {
-        case 'C':
-          key |= CONTROL;
-          break;
-        case 'S':
-          key |= SHIFT;
-          break;
-        case 'A':
-          key |= ALT;
-          break;
-        case 'W':
-          key |= WIN;
-          break;
-        case '%':
-          key = (key & MASK) | '%';
-          ++position;
-          goto no_more_modifiers;
-        default:
-          key = (key & MASK) | '%';
-          goto no_more_modifiers;
-        }
-        ++position;
-      }
-      key = (key & MASK) | command[position];
-      ++position;
-      no_more_modifiers:
-      auto index = std::make_tuple(key, key_position);
-      this->key_index[index].insert(command_index);
-      ++key_position;
-    }
-    this->key_index[std::make_tuple(0, key_position)].insert(command_index);
-  }
-
-  /// >= 0 = Command index
-  /// -1 = Ok, continue
-  /// -2 = Not found
-  int has_next_key(int ch, bool ctrl, bool shift, bool alt, bool win) const {
-    if (ctrl) ch |= CommandMap::CONTROL;
-    if (shift) ch |= CommandMap::SHIFT;
-    if (alt) ch |= CommandMap::ALT;
-    if (win) ch |= CommandMap::WIN;
-
-    if (!this->in_command) {
-      if (ch == this->leader) {
-        this->in_command = true;
-        return -1;
-      } else {
-        return -2;
-      }
-    }
-
-    auto const key = std::make_tuple(this->lookup_position, ch);
-    auto const commands = this->key_index.find(key);
-    if (commands == this->key_index.end()) {
-      this->in_command = false;
-      this->lookup_commands.clear();
-      this->lookup_position = 0;
-      return -2;
-    }
-
-    auto const commands_for_key = commands->second;
-    if (this->lookup_position == 0) {
-      this->lookup_commands.insert(commands_for_key.begin(), commands_for_key.end());
-    } else {
-      auto item = this->lookup_commands.begin();
-      while (item != this->lookup_commands.end()) {
-        if (commands_for_key.find(*item) == commands_for_key.end()) {
-          item = this->lookup_commands.erase(item);
-        } else {
-          ++item;
-        }
-      }
-    }
-  }
-
-  int get(const char *command, size_t length) const {
-    int position = 0;
-    while (position < length) {
-      // TODO: Find
-      ++position;
-    }
-    return -1;
-  }
-
-  int get(std::string const &command) const {
-    return this->get(command.c_str(), command.size());
-  }
-};
-*/
-
 struct CommandKey {
   bool control;
   bool alt;
@@ -205,6 +90,14 @@ struct CommandKey {
       | (!this->shift | other.shift)
       | (!this->win | other.win)
       | !(this->key_code ^ other.key_code);
+  }
+
+  void clear() {
+    this->control = false;
+    this->alt = false;
+    this->shift = false;
+    this->win = false;
+    this->key_code = 0;
   }
 };
 
@@ -250,42 +143,39 @@ public:
   }
 
   bool key_down(int key) {
-    bool soft_key = true;
     switch (key) {
     case VK_LCONTROL:
     case VK_RCONTROL:
       this->state.control = true;
-      break;
+      return false;
     case VK_LSHIFT:
     case VK_RSHIFT:
       this->state.shift = true;
-      break;
+      return false;
+    case VK_LMENU:
+    case VK_RMENU:
+      this->state.alt = true;
+      return false;
     case VK_LWIN:
     case VK_RWIN:
       this->state.win = true;
-      break;
+      return false;
     default:
-      soft_key = false;
       break;
     }
 
     if (!this->is_in_tracked_window()) {
       this->in_command = 0;
       this->expecting_leader_up = false;
-      this->state.key_code = 0;
+      this->state.clear();
       return false;
     }
-    if (!soft_key || this->state.key_code == 0) {
-      this->state.key_code = key;
-    }
+    this->state.key_code = key;
+    std::wcout << L"Key code: " << key << L"\n";
     if (this->in_command == 1) {
-      if (!soft_key) {
-        ++this->in_command;
-      }
+      ++this->in_command;
     } else if (this->in_command > 1) {
-      if (!soft_key) {
-        this->in_command = 0;
-      }
+      this->in_command = 0;
     } else if (this->state == this->leader) {
       this->in_command = 1;
     }
@@ -297,7 +187,7 @@ public:
   bool key_up(int key) {
     if (!this->is_in_tracked_window()) {
       this->in_command = 0;
-      this->state.key_code = 0;
+      this->state.clear();
       return false;
     }
     // check for commands...
@@ -313,17 +203,20 @@ public:
     case VK_LCONTROL:
     case VK_RCONTROL:
       this->state.control = false;
-      break;
+      return false;
     case VK_LSHIFT:
     case VK_RSHIFT:
       this->state.shift = false;
-      break;
+      return false;
+    case VK_LMENU:
+    case VK_RMENU:
+      this->state.alt = false;
+      return false;
     case VK_LWIN:
     case VK_RWIN:
       this->state.win = false;
-      break;
+      return false;
     default:
-      std::wcout << L"Key up: " << (wchar_t)key << L"\n";
       this->state.key_code = 0;
       break;
     }

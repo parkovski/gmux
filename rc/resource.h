@@ -2,15 +2,11 @@
 // Microsoft Visual C++ generated include file.
 // Used by server.rc
 //
-#define IDC_MYICON                      2
-#define IDD_SERVER_DIALOG               102
 #define IDI_SERVER                      107
 #define IDI_SMALL                       108
-#define IDR_MAINFRAME                   128
-#define IDC_STATIC                      -1
 
 // Next default values for new objects
-// 
+//
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
