@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "(Windows) Launch",
+        "type": "cppvsdbg",
+        "request": "launch",
+        "program": "${workspaceRoot}\\x64\\Debug\\gmux.exe",
+        "args": [],
+        "stopAtEntry": false,
+        "cwd": "${workspaceRoot}",
+        "environment": [],
+        "externalConsole": false,
+        "symbolSearchPath": "C:\\Program Files (x86)\\Windows Kits\\10\\Debuggers\\x64\\sym"
+      }
+    ]
+  }
