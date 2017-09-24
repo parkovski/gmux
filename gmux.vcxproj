@@ -154,6 +154,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="gmux/gmux.cpp" />
+    <ClCompile Include="gmux/server.cpp" />
+    <ClCompile Include="gmux/client.cpp" />
     <ClCompile Include="gmux/stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
