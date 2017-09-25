@@ -161,29 +161,18 @@ public:
     this->state.key_code = key;
     if (this->in_command == 1) {
       ++this->in_command;
+      return true;
     } else if (this->in_command > 1) {
       this->in_command = 0;
-    } else if (this->state == this->leader) {
-      this->in_command = 1;
     }
-    return this->in_command;
+    if (this->state == this->leader) {
+      this->in_command = 1;
+      return true;
+    }
+    return false;
   }
 
   bool key_up(int key) {
-    if (!this->is_in_tracked_window()) {
-      this->in_command = 0;
-      this->state.clear();
-      return false;
-    }
-    // check for commands...
-    if (this->in_command == 2) {
-      if (this->state == this->quit) {
-        this->quitting = true;
-      } else if (this->state == this->message) {
-        std::wcout << L"Hello!\n";
-      }
-    }
-
     switch (key) {
     case VK_LCONTROL:
     case VK_RCONTROL:
@@ -202,11 +191,21 @@ public:
       this->state.win = false;
       return false;
     default:
-      this->state.key_code = 0;
       break;
     }
 
-    return this->in_command;
+    bool ate_prev_key = this->state.key_code == key;
+    // check for commands...
+    if (this->in_command == 2) {
+      if (this->state == this->quit) {
+        this->quitting = true;
+      } else if (this->state == this->message) {
+        std::wcout << L"Hello!\n";
+      }
+    }
+
+    this->state.key_code = 0;
+    return ate_prev_key;
   }
 
   bool should_quit() const {
