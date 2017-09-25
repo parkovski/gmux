@@ -159,7 +159,6 @@ public:
       return false;
     }
     this->state.key_code = key;
-    std::wcout << L"Key code: " << key << L"\n";
     if (this->in_command == 1) {
       ++this->in_command;
     } else if (this->in_command > 1) {
@@ -239,8 +238,6 @@ LRESULT CALLBACK KeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
   }
 }
 
-const DWORD PIPE_BUFFER_SIZE = 256;
-
 DWORD WINAPI PipeListenerThread(void *param) {
   HANDLE pipe = (HANDLE)param;
   char buffer[PIPE_BUFFER_SIZE + 2];
@@ -319,9 +316,8 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   }
 
   UnhookWindowsHookEx(hook);
-  DisconnectNamedPipe(pipe);
-  CloseHandle(pipe);
-  WaitForSingleObject(pipeThread, 500);
+  CancelSynchronousIo(pipeThread);
+  WaitForSingleObject(pipeThread, 100);
   DWORD exitCode;
   GetExitCodeThread(pipeThread, &exitCode);
   if (exitCode == STILL_ACTIVE) {
@@ -329,6 +325,8 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
     TerminateThread(pipeThread, 0);
   }
   CloseHandle(pipeThread);
+  DisconnectNamedPipe(pipe);
+  CloseHandle(pipe);
 
   return (int) msg.wParam;
 }
