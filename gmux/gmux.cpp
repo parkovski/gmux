@@ -35,5 +35,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
   if (ret == -1) {
     ret = ServerMain(pipe_name, hInstance);
   }
+  if (ret != 0) {
+    std::wcerr << L"Couldn't start.\n";
+  }
   return ret;
 }

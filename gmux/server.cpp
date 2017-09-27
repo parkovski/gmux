@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "commands.h"
 #include "gmux.h"
 
 void fix(std::wstring &s) {
@@ -7,29 +8,17 @@ void fix(std::wstring &s) {
 
 BOOL FindShellWindows(HWND hWnd, LPARAM lParam);
 
-struct WindowMatch {
-  const std::vector<std::wstring> shells;
-  std::vector<HWND> windows;
-
-  WindowMatch(const std::initializer_list<std::wstring> shells) : shells(shells) {}
-
-  void scan() {
-    EnumDesktopWindows((HDESK)nullptr, FindShellWindows, (LPARAM)this);
-  }
-};
+void WindowMatch::scan() {
+  EnumDesktopWindows((HDESK)nullptr, FindShellWindows, (LPARAM)this);
+}
 
 BOOL FindShellWindows(HWND hWnd, LPARAM lParam) {
   auto match = (WindowMatch *)lParam;
-  static std::wstring title;
   static std::wstring processName;
   if (std::find(match->windows.begin(), match->windows.end(), hWnd) != match->windows.end()) {
     // We've already got this one.
     return true;
   }
-  auto titleLen = GetWindowTextLengthW(hWnd);
-  title.resize(titleLen + 1);
-  GetWindowTextW(hWnd, &title[0], titleLen + 1);
-  fix(title);
   DWORD processId;
   GetWindowThreadProcessId(hWnd, &processId);
   auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
@@ -52,42 +41,6 @@ BOOL FindShellWindows(HWND hWnd, LPARAM lParam) {
 
   return true;
 }
-
-struct CommandKey {
-  bool control;
-  bool alt;
-  bool shift;
-  bool win;
-  int key_code;
-
-  CommandKey()
-    : control(false), alt(false), shift(false), win(false), key_code(0)
-  {}
-
-  CommandKey(int vk)
-    : control(false), alt(false), shift(false), win(false), key_code(vk)
-  {}
-
-  CommandKey(bool ctrl, bool alt, bool shift, bool win, int vk)
-    : control(ctrl), alt(alt), shift(shift), win(win), key_code(vk)
-  {}
-
-  bool operator==(const CommandKey &other) {
-    return this->control == other.control
-      && this->alt == other.alt
-      && this->shift == other.shift
-      && this->win == other.win
-      && this->key_code == other.key_code;
-  }
-
-  void clear() {
-    this->control = false;
-    this->alt = false;
-    this->shift = false;
-    this->win = false;
-    this->key_code = 0;
-  }
-};
 
 class CommandRecognizer {
   WindowMatch match;
@@ -134,19 +87,19 @@ public:
     switch (key) {
     case VK_LCONTROL:
     case VK_RCONTROL:
-      this->state.control = true;
+      this->state.with_ctrl();
       return false;
     case VK_LSHIFT:
     case VK_RSHIFT:
-      this->state.shift = true;
+      this->state.with_shift();
       return false;
     case VK_LMENU:
     case VK_RMENU:
-      this->state.alt = true;
+      this->state.with_alt();
       return false;
     case VK_LWIN:
     case VK_RWIN:
-      this->state.win = true;
+      this->state.with_win();
       return false;
     default:
       break;
@@ -158,7 +111,7 @@ public:
       this->state.clear();
       return false;
     }
-    this->state.key_code = key;
+    this->state.set_key_code(key);
     if (this->in_command == 1) {
       ++this->in_command;
       return true;
@@ -176,25 +129,25 @@ public:
     switch (key) {
     case VK_LCONTROL:
     case VK_RCONTROL:
-      this->state.control = false;
+      this->state.with_ctrl(false);
       return false;
     case VK_LSHIFT:
     case VK_RSHIFT:
-      this->state.shift = false;
+      this->state.with_shift(false);
       return false;
     case VK_LMENU:
     case VK_RMENU:
-      this->state.alt = false;
+      this->state.with_alt(false);
       return false;
     case VK_LWIN:
     case VK_RWIN:
-      this->state.win = false;
+      this->state.with_win(false);
       return false;
     default:
       break;
     }
 
-    bool ate_prev_key = this->state.key_code == key;
+    bool ate_prev_key = this->state.get_key_code() == key;
     // check for commands...
     if (this->in_command == 2) {
       if (this->state == this->quit) {
@@ -204,7 +157,7 @@ public:
       }
     }
 
-    this->state.key_code = 0;
+    this->state.set_key_code(0);
     return ate_prev_key;
   }
 
@@ -237,38 +190,97 @@ LRESULT CALLBACK KeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
   }
 }
 
+struct SharedMessageState {
+  const HANDLE pipe;
+  const HANDLE mutex;
+  const HANDLE event;
+  std::wstring message;
+
+  SharedMessageState(HANDLE pipe)
+    : pipe(pipe),
+      mutex(CreateMutexW(nullptr, false, nullptr)),
+      event(CreateEventW(nullptr, true, false, nullptr))
+  {}
+
+  ~SharedMessageState() {
+    CloseHandle(this->mutex);
+    CloseHandle(this->event);
+  }
+};
+
 DWORD WINAPI PipeListenerThread(void *param) {
-  HANDLE pipe = (HANDLE)param;
-  char buffer[PIPE_BUFFER_SIZE + 2];
+  auto state = (SharedMessageState *)param;
+  char buffer[PIPE_BUFFER_SIZE];
+  std::wstring message;
   DWORD bytesRead;
 
   while (true) {
-    if (!ConnectNamedPipe(pipe, nullptr)) {
+    if (!ConnectNamedPipe(state->pipe, nullptr)) {
       auto error = GetLastError();
       if (error != ERROR_PIPE_CONNECTED) {
         return error;
       }
     }
-    auto result = ReadFile(pipe, buffer, PIPE_BUFFER_SIZE, &bytesRead, nullptr);
-    if (!result || bytesRead == 0) {
-      return GetLastError();
+
+    bytesRead = 0;
+    message.clear();
+    while (true) {
+      auto result = ReadFile(state->pipe, buffer, PIPE_BUFFER_SIZE, &bytesRead, nullptr);
+      if (!result || bytesRead == 0) {
+        auto error = GetLastError();
+        if (error == ERROR_MORE_DATA) {
+          message.append(reinterpret_cast<wchar_t *>(buffer), bytesRead / sizeof(wchar_t));
+          continue;
+        }
+        DisconnectNamedPipe(state->pipe);
+        return error;
+      } else {
+        break;
+      }
     }
-    buffer[bytesRead] = buffer[bytesRead + 1] = 0;
-    std::wcout << L"Message: " << reinterpret_cast<wchar_t *>(buffer) << L"\n";
-    if (!DisconnectNamedPipe(pipe)) {
+
+    DWORD waitResult;
+    while (true) {
+      waitResult = WaitForSingleObject(state->mutex, 1000);
+      switch (waitResult) {
+      case WAIT_OBJECT_0:
+        break;
+      case WAIT_TIMEOUT:
+        DisconnectNamedPipe(state->pipe);
+        return ERROR_TIMEOUT;
+      case WAIT_FAILED:
+        DisconnectNamedPipe(state->pipe);
+        return GetLastError();
+      default:
+        DisconnectNamedPipe(state->pipe);
+        return ERROR_CANT_WAIT;
+      }
+
+      if (!state->message.empty()) {
+        ReleaseMutex(state->mutex);
+        Sleep(50);
+        continue;
+      }
+
+      state->message = message;
+      ReleaseMutex(state->mutex);
+      SetEvent(state->event);
+      break;
+    }
+
+    if (!DisconnectNamedPipe(state->pipe)) {
       return GetLastError();
     }
   }
 }
 
-// TODO: PostQuitMessage is per-thread, so need to send commands
-// from the main thread.
+// TODO: Move everything except message loop to pipe thread.
 int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   auto pipe = CreateNamedPipeW(
     pipe_name.c_str(),
     PIPE_ACCESS_DUPLEX,
-    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS,
-    2,
+    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+    3,
     PIPE_BUFFER_SIZE,
     PIPE_BUFFER_SIZE,
     0,
@@ -281,7 +293,7 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   }
 
   CommandRecognizer cr{L"powershell.exe", L"cmd.exe"};
-  cr.set_leader(CommandKey(true, false, false, false, 'A'));
+  cr.set_leader(CommandKey('A').with_ctrl());
   cr.scan_windows();
   command_recognizer = &cr;
 
@@ -292,11 +304,13 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
     return 1;
   }
 
+  SharedMessageState messageState(pipe);
+
   auto pipeThread = CreateThread(
     nullptr,
     0,
     PipeListenerThread,
-    (void *)pipe,
+    (void *)&messageState,
     0,
     nullptr
   );
@@ -308,8 +322,30 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
     return 1;
   }
 
+
   MSG msg;
+  DWORD exitCode;
   while (GetMessage(&msg, nullptr, 0, 0)) {
+    if (WaitForSingleObject(messageState.event, 0) == WAIT_OBJECT_0) {
+      switch (WaitForSingleObject(messageState.mutex, 0)) {
+      case WAIT_OBJECT_0:
+        std::wcout << L"Message: " << messageState.message << L"\n";
+        messageState.message.clear();
+        ResetEvent(messageState.event);
+        ReleaseMutex(messageState.mutex);
+        break;
+      case WAIT_TIMEOUT:
+        break;
+      default:
+        std::wcerr << L"Wait mutex failed\n";
+        PostQuitMessage(1);
+        break;
+      }
+    }
+    if (GetExitCodeThread(pipeThread, &exitCode) && exitCode != STILL_ACTIVE) {
+      std::wcerr << L"Listener thread error.\n";
+      PostQuitMessage(1);
+    }
     TranslateMessage(&msg);
     DispatchMessage(&msg);
   }
@@ -317,7 +353,6 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   UnhookWindowsHookEx(hook);
   CancelSynchronousIo(pipeThread);
   WaitForSingleObject(pipeThread, 100);
-  DWORD exitCode;
   GetExitCodeThread(pipeThread, &exitCode);
   if (exitCode == STILL_ACTIVE) {
     std::wcerr << L"The thread didn't exit.\n";

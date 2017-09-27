@@ -10,3 +10,6 @@
 #include <cstdio>
 #include <unordered_map>
 #include <set>
+#include <functional>
+#include <iterator>
+#include <algorithm>
