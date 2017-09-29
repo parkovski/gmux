@@ -2,20 +2,44 @@
 #include "commands.h"
 #include "gmux.h"
 
-void fix(std::wstring &s) {
-  s.erase(std::find(s.begin(), s.end(), L'\0'), s.end());
-}
+class SharedMessageState {
+public:
+  const DWORD main_thread_id;
+  const HANDLE pipe;
+  const HANDLE event_cmd_ready;
+  std::atomic_size_t cmd_index;
+  std::basic_string<CommandKey> cmd_shortcut;
+  WindowMatch win_match;
+  CommandMap cmd_map;
+  KeyRecognizer key_rec;
 
-BOOL FindShellWindows(HWND hWnd, LPARAM lParam);
+  SharedMessageState(DWORD main_thread_id, HANDLE pipe, WindowMatch &&win_match)
+    : main_thread_id(main_thread_id),
+      pipe(pipe),
+      event_cmd_ready(CreateEventW(nullptr, true, false, nullptr)),
+      win_match(std::move(win_match))
+  {
+    Command::create_defaults(this->cmd_map, this->main_thread_id);
+    this->win_match.scan();
+  }
 
-void WindowMatch::scan() {
-  EnumDesktopWindows((HDESK)nullptr, FindShellWindows, (LPARAM)this);
-}
+  ~SharedMessageState() {
+    DisconnectNamedPipe(this->pipe);
+    CloseHandle(this->pipe);
+    CloseHandle(this->event_cmd_ready);
+  }
+};
+
+static SharedMessageState *shared_state;
 
 BOOL FindShellWindows(HWND hWnd, LPARAM lParam) {
   auto match = (WindowMatch *)lParam;
   static std::wstring processName;
-  if (std::find(match->windows.begin(), match->windows.end(), hWnd) != match->windows.end()) {
+  if (
+    std::find(match->windows.cbegin(), match->windows.cend(), hWnd)
+      != match->windows.cend()
+  )
+  {
     // We've already got this one.
     return true;
   }
@@ -26,7 +50,10 @@ BOOL FindShellWindows(HWND hWnd, LPARAM lParam) {
   processName.clear();
   processName.resize(processLen);
   QueryFullProcessImageNameW(process, 0, &processName[0], &processLen);
-  fix(processName);
+  processName.erase(
+    std::find(processName.begin(), processName.end(), L'\0'),
+    processName.end()
+  );
   CloseHandle(process);
 
   for (auto const &shell: match->shells) {
@@ -42,132 +69,6 @@ BOOL FindShellWindows(HWND hWnd, LPARAM lParam) {
   return true;
 }
 
-class CommandRecognizer {
-  WindowMatch match;
-  CommandKey state;
-  CommandKey leader;
-  int in_command;
-  bool expecting_leader_up;
-  bool quitting;
-
-  const CommandKey quit;
-  const CommandKey message;
-
-public:
-  CommandRecognizer(std::initializer_list<std::wstring> shells)
-    : match(shells),
-      in_command(0),
-      expecting_leader_up(false),
-      quitting(false),
-      quit(CommandKey('D')),
-      message(CommandKey('M'))
-  {}
-
-  void set_leader(CommandKey const &leader) {
-    this->leader = leader;
-  }
-
-  void scan_windows() {
-    this->match.scan();
-  }
-
-  WindowMatch &get_match() {
-    return this->match;
-  }
-
-  bool is_in_tracked_window() const {
-    auto foreground = GetForegroundWindow();
-    for (auto window: this->match.windows) {
-      if (foreground == window) return true;
-    }
-    return false;
-  }
-
-  bool key_down(int key) {
-    switch (key) {
-    case VK_LCONTROL:
-    case VK_RCONTROL:
-      this->state.with_ctrl();
-      return false;
-    case VK_LSHIFT:
-    case VK_RSHIFT:
-      this->state.with_shift();
-      return false;
-    case VK_LMENU:
-    case VK_RMENU:
-      this->state.with_alt();
-      return false;
-    case VK_LWIN:
-    case VK_RWIN:
-      this->state.with_win();
-      return false;
-    default:
-      break;
-    }
-
-    if (!this->is_in_tracked_window()) {
-      this->in_command = 0;
-      this->expecting_leader_up = false;
-      this->state.clear();
-      return false;
-    }
-    this->state.set_key_code(key);
-    if (this->in_command == 1) {
-      ++this->in_command;
-      return true;
-    } else if (this->in_command > 1) {
-      this->in_command = 0;
-    }
-    if (this->state == this->leader) {
-      this->in_command = 1;
-      return true;
-    }
-    return false;
-  }
-
-  bool key_up(int key) {
-    switch (key) {
-    case VK_LCONTROL:
-    case VK_RCONTROL:
-      this->state.with_ctrl(false);
-      return false;
-    case VK_LSHIFT:
-    case VK_RSHIFT:
-      this->state.with_shift(false);
-      return false;
-    case VK_LMENU:
-    case VK_RMENU:
-      this->state.with_alt(false);
-      return false;
-    case VK_LWIN:
-    case VK_RWIN:
-      this->state.with_win(false);
-      return false;
-    default:
-      break;
-    }
-
-    bool ate_prev_key = this->state.get_key_code() == key;
-    // check for commands...
-    if (this->in_command == 2) {
-      if (this->state == this->quit) {
-        this->quitting = true;
-      } else if (this->state == this->message) {
-        std::wcout << L"Hello!\n";
-      }
-    }
-
-    this->state.set_key_code(0);
-    return ate_prev_key;
-  }
-
-  bool should_quit() const {
-    return this->quitting;
-  }
-};
-
-static CommandRecognizer *command_recognizer;
-
 LRESULT CALLBACK KeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
   if (nCode < 0) {
     return CallNextHookEx((HHOOK)nullptr, nCode, wParam, lParam);
@@ -176,12 +77,26 @@ LRESULT CALLBACK KeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
   auto code = hook->vkCode;
   bool eat = false;
   if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
-    eat = command_recognizer->key_down(code);
+    eat = shared_state->key_rec.key_down(code);
+    if (!shared_state->win_match.is_in_tracked_window()) {
+      eat = false;
+    } else if (eat) {
+      shared_state->cmd_shortcut.push_back(shared_state->key_rec.get_key());
+      auto result = shared_state->cmd_map.get_command(shared_state->cmd_shortcut);
+      if (result == CommandMap::INVALID) {
+        eat = false;
+        shared_state->cmd_shortcut.clear();
+      } else if (result == CommandMap::PARTIAL) {
+        shared_state->key_rec.ate_key();
+      } else {
+        shared_state->cmd_shortcut.clear();
+        shared_state->key_rec.ate_key();
+        shared_state->cmd_index.store(result);
+        SetEvent(shared_state->event_cmd_ready);
+      }
+    }
   } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
-    eat = command_recognizer->key_up(code);
-  }
-  if (command_recognizer->should_quit()) {
-    PostQuitMessage(0);
+    eat = shared_state->key_rec.key_up(code);
   }
   if (eat) {
     return 1;
@@ -190,23 +105,17 @@ LRESULT CALLBACK KeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
   }
 }
 
-struct SharedMessageState {
-  const HANDLE pipe;
-  const HANDLE mutex;
-  const HANDLE event;
-  std::wstring message;
-
-  SharedMessageState(HANDLE pipe)
-    : pipe(pipe),
-      mutex(CreateMutexW(nullptr, false, nullptr)),
-      event(CreateEventW(nullptr, true, false, nullptr))
-  {}
-
-  ~SharedMessageState() {
-    CloseHandle(this->mutex);
-    CloseHandle(this->event);
+DWORD WINAPI CommandDispatchThread(void *param) {
+  auto state = (SharedMessageState *)param;
+  while (true) {
+    auto result = WaitForSingleObject(state->event_cmd_ready, INFINITE);
+    if (result == WAIT_OBJECT_0) {
+      size_t command = state->cmd_index.load();
+      state->cmd_map.run(command, state->win_match);
+    }
+    ResetEvent(state->event_cmd_ready);
   }
-};
+}
 
 DWORD WINAPI PipeListenerThread(void *param) {
   auto state = (SharedMessageState *)param;
@@ -215,6 +124,7 @@ DWORD WINAPI PipeListenerThread(void *param) {
   DWORD bytesRead;
 
   while (true) {
+    reconnect:
     if (!ConnectNamedPipe(state->pipe, nullptr)) {
       auto error = GetLastError();
       if (error != ERROR_PIPE_CONNECTED) {
@@ -229,43 +139,27 @@ DWORD WINAPI PipeListenerThread(void *param) {
       if (!result || bytesRead == 0) {
         auto error = GetLastError();
         if (error == ERROR_MORE_DATA) {
-          message.append(reinterpret_cast<wchar_t *>(buffer), bytesRead / sizeof(wchar_t));
+          message.append(
+            reinterpret_cast<wchar_t *>(buffer),
+            bytesRead / sizeof(wchar_t)
+          );
           continue;
         }
         DisconnectNamedPipe(state->pipe);
-        return error;
+        goto reconnect;
       } else {
+        message.append(
+          reinterpret_cast<wchar_t *>(buffer),
+          bytesRead / sizeof(wchar_t)
+        );
         break;
       }
     }
 
-    DWORD waitResult;
-    while (true) {
-      waitResult = WaitForSingleObject(state->mutex, 1000);
-      switch (waitResult) {
-      case WAIT_OBJECT_0:
-        break;
-      case WAIT_TIMEOUT:
-        DisconnectNamedPipe(state->pipe);
-        return ERROR_TIMEOUT;
-      case WAIT_FAILED:
-        DisconnectNamedPipe(state->pipe);
-        return GetLastError();
-      default:
-        DisconnectNamedPipe(state->pipe);
-        return ERROR_CANT_WAIT;
-      }
-
-      if (!state->message.empty()) {
-        ReleaseMutex(state->mutex);
-        Sleep(50);
-        continue;
-      }
-
-      state->message = message;
-      ReleaseMutex(state->mutex);
-      SetEvent(state->event);
-      break;
+    auto result = state->cmd_map.get_command(message);
+    if (result != CommandMap::INVALID && result != CommandMap::PARTIAL) {
+      state->cmd_index.store(result);
+      SetEvent(state->event_cmd_ready);
     }
 
     if (!DisconnectNamedPipe(state->pipe)) {
@@ -288,23 +182,16 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   );
 
   if (pipe == INVALID_HANDLE_VALUE) {
-    std::wcerr << L"Error creating named pipe.\n";
+    std::wcerr << L"Error creating named pipe." << std::endl;
     return 1;
   }
 
-  CommandRecognizer cr{L"powershell.exe", L"cmd.exe"};
-  cr.set_leader(CommandKey('A').with_ctrl());
-  cr.scan_windows();
-  command_recognizer = &cr;
-
-  auto hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, hInstance, 0);
-  if (hook == nullptr) {
-    std::wcerr << L"Error creating keyboard hook.\n";
-    CloseHandle(pipe);
-    return 1;
-  }
-
-  SharedMessageState messageState(pipe);
+  SharedMessageState messageState(
+    GetCurrentThreadId(),
+    pipe,
+    WindowMatch{L"powershell.exe", L"cmd.exe"}
+  );
+  shared_state = &messageState;
 
   auto pipeThread = CreateThread(
     nullptr,
@@ -316,36 +203,39 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   );
 
   if (pipeThread == nullptr) {
-    std::wcerr << L"Error creating server listener thread.\n";
+    std::wcerr << L"Error creating server listener thread." << std::endl;
     CloseHandle(pipe);
-    UnhookWindowsHookEx(hook);
     return 1;
   }
 
+  auto commandThread = CreateThread(
+    nullptr,
+    0,
+    CommandDispatchThread,
+    (void *)&messageState,
+    0,
+    nullptr
+  );
+
+  if (commandThread == nullptr) {
+    std::wcerr << L"Error creating server command thread." << std::endl;
+    CancelSynchronousIo(pipeThread);
+    TerminateThread(pipeThread, 0);
+    return 1;
+  }
+
+  auto hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, hInstance, 0);
+  if (hook == nullptr) {
+    std::wcerr << L"Error creating keyboard hook." << std::endl;
+    TerminateThread(commandThread, 0);
+    CancelSynchronousIo(pipeThread);
+    TerminateThread(pipeThread, 0);
+    return 1;
+  }
 
   MSG msg;
   DWORD exitCode;
-  while (GetMessage(&msg, nullptr, 0, 0)) {
-    if (WaitForSingleObject(messageState.event, 0) == WAIT_OBJECT_0) {
-      switch (WaitForSingleObject(messageState.mutex, 0)) {
-      case WAIT_OBJECT_0:
-        std::wcout << L"Message: " << messageState.message << L"\n";
-        messageState.message.clear();
-        ResetEvent(messageState.event);
-        ReleaseMutex(messageState.mutex);
-        break;
-      case WAIT_TIMEOUT:
-        break;
-      default:
-        std::wcerr << L"Wait mutex failed\n";
-        PostQuitMessage(1);
-        break;
-      }
-    }
-    if (GetExitCodeThread(pipeThread, &exitCode) && exitCode != STILL_ACTIVE) {
-      std::wcerr << L"Listener thread error.\n";
-      PostQuitMessage(1);
-    }
+  while (GetMessage(&msg, nullptr, 0, 0) > 0) {
     TranslateMessage(&msg);
     DispatchMessage(&msg);
   }
@@ -355,12 +245,12 @@ int ServerMain(std::wstring const &pipe_name, HINSTANCE hInstance) {
   WaitForSingleObject(pipeThread, 100);
   GetExitCodeThread(pipeThread, &exitCode);
   if (exitCode == STILL_ACTIVE) {
-    std::wcerr << L"The thread didn't exit.\n";
+    std::wcerr << L"The thread didn't exit." << std::endl;
     TerminateThread(pipeThread, 0);
   }
   CloseHandle(pipeThread);
-  DisconnectNamedPipe(pipe);
-  CloseHandle(pipe);
+  TerminateThread(commandThread, 0);
+  CloseHandle(commandThread);
 
   return (int) msg.wParam;
 }

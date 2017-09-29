@@ -4,6 +4,7 @@
 #include <functional>
 #include <iterator>
 #include <algorithm>
+#include <memory>
 #include <Windows.h>
 
 struct WindowMatch {
@@ -15,14 +16,15 @@ struct WindowMatch {
   {}
 
   void scan();
+  bool is_in_tracked_window() const;
 };
 
 class CommandKey {
-  const int CONTROL = 0x00100000;
-  const int ALT = 0x00200000;
-  const int SHIFT = 0x00400000;
-  const int WIN = 0x00800000;
-  const int MASK = 0x00F00000;
+  static const int CONTROL = 0x00100000;
+  static const int ALT = 0x00200000;
+  static const int SHIFT = 0x00400000;
+  static const int WIN = 0x00800000;
+  static const int MASK = 0x00F00000;
 
   int key;
 
@@ -47,7 +49,7 @@ public:
     : key(other.key)
   {}
 
-  CommandKey &with_ctrl(bool with = true) {
+  CommandKey &set_ctrl(bool with = true) {
     this->set_mask(CommandKey::CONTROL, with);
     return *this;
   }
@@ -56,7 +58,7 @@ public:
     return this->key & CommandKey::CONTROL;
   }
 
-  CommandKey &with_alt(bool with = true) {
+  CommandKey &set_alt(bool with = true) {
     this->set_mask(CommandKey::ALT, with);
     return *this;
   }
@@ -65,7 +67,7 @@ public:
     return this->key & CommandKey::ALT;
   }
 
-  CommandKey &with_shift(bool with = true) {
+  CommandKey &set_shift(bool with = true) {
     this->set_mask(CommandKey::SHIFT, with);
     return *this;
   }
@@ -74,7 +76,7 @@ public:
     return this->key & CommandKey::SHIFT;
   }
 
-  CommandKey &with_win(bool with = true) {
+  CommandKey &set_win(bool with = true) {
     this->set_mask(CommandKey::WIN, with);
     return *this;
   }
@@ -126,119 +128,47 @@ public:
   }
 };
 
-class SequenceKey {
-  unsigned position;
+class KeyRecognizer {
   CommandKey key;
-  unsigned sequence;
+  bool ate_prev_key;
 
 public:
-  SequenceKey(unsigned position, CommandKey key, unsigned sequence)
-    : position(position), key(key), sequence(sequence)
-  {}
-
-  static bool less_key(SequenceKey const &self, SequenceKey const &other) {
-    if (self.position < other.position) return true;
-    return self.key < other.key;
-  }
-
-  bool operator==(SequenceKey const &other) const {
-    return
-      this->position == other.position
-      && this->key == other.key
-      && this->sequence == other.sequence;
-  }
-
-  bool operator!=(SequenceKey const &other) const {
-    return !(*this == other);
-  }
-
-  /// Order is important here for lookup.
-  bool operator<(SequenceKey const &other) const {
-    if (this->position < other.position) return true;
-    if (this->key < other.key) return true;
-    if (this->sequence < other.sequence) return true;
-    return false;
-  }
-
-  bool operator<=(SequenceKey const &other) const {
-    return !(other < *this);
-  }
-
-  bool operator>(SequenceKey const &other) const {
-    return other < *this;
-  }
-
-  bool operator>=(SequenceKey const &other) const {
-    return !(*this < other);
-  }
+  bool key_down(int vk);
+  bool key_up(int vk);
+  void ate_key();
+  CommandKey get_key() const;
 };
 
-class CommandKeyMap {
-  unsigned sequence;
-  std::vector<SequenceKey> list;
 
+class Command;
+class CommandMap {
+  std::unordered_map<std::wstring, size_t> names;
+  std::unordered_map<std::basic_string<CommandKey>, size_t> shortcuts;
+  std::vector<std::unique_ptr<Command>> commands;
+
+  bool add_shortcut_parts(
+    std::basic_string<CommandKey> const &shortcut
+  );
 public:
-  CommandKeyMap()
-    : sequence(0), list()
-  {}
+  size_t add_command(Command *command);
+  bool add_name(size_t command, std::wstring const &name);
+  bool add_shortcut(
+    size_t command,
+    std::basic_string<CommandKey> const &shortcut
+  );
 
-  template<typename Iter>
-  void add(const Iter &iter) {
-    unsigned position = 0;
-    unsigned sequence = this->sequence;
-    ++this->sequence;
-    for (auto const &key: iter) {
-      this->list.push_back(SequenceKey(position, sequence, key));
-      ++position;
-    }
-  }
+  static const size_t PARTIAL = SIZE_MAX;
+  static const size_t INVALID = SIZE_MAX - 1;
 
-  unsigned sequence_count() const {
-    return this->sequence;
-  }
+  size_t get_command(std::wstring const &str);
+  size_t get_command(std::basic_string<CommandKey> const &shortcut);
 
-private:
-  friend class KeySeqMatcher;
-  void finish() {
-    std::sort(this->list.begin(), this->list.end());
-  }
-
-  auto find(unsigned position, CommandKey key)
-    -> std::pair<
-      std::vector<SequenceKey>::const_iterator,
-      std::vector<SequenceKey>::const_iterator
-    >
-  {
-    return std::equal_range(
-      this->list.cbegin(),
-      this->list.cend(),
-      SequenceKey(position, key, 0),
-      &SequenceKey::less_key
-    );
-  }
+  void run(size_t command, WindowMatch &wm);
 };
 
-class KeySeqMatcher {
-  CommandKeyMap key_map;
-  std::vector<bool> valid_sequences;
-  unsigned position;
-
+class Command {
 public:
-  KeySeqMatcher(CommandKeyMap &&key_map)
-    : key_map(key_map)
-  {
-    this->valid_sequences.resize(this->key_map.sequence_count());
-    this->key_map.finish();
-  }
+  virtual void run(WindowMatch &wm) = 0;
 
-  void begin() {
-    auto size = this->valid_sequences.size();
-    this->valid_sequences.assign(size, true);
-    this->position = 0;
-  }
-
-  bool next(CommandKey key) {
-    auto range = this->key_map.find(this->position, key);
-    //...
-  }
+  static void create_defaults(CommandMap &map, DWORD thread_id);
 };

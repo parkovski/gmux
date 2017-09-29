@@ -13,3 +13,5 @@
 #include <functional>
 #include <iterator>
 #include <algorithm>
+#include <memory>
+#include <atomic>

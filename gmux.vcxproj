@@ -149,6 +149,7 @@
   <ItemGroup>
     <ClInclude Include="rc/resource.h" />
     <ClInclude Include="include/gmux.h" />
+    <ClInclude Include="include/commands.h" />
     <ClInclude Include="include/stdafx.h" />
     <ClInclude Include="include/targetver.h" />
   </ItemGroup>
@@ -156,6 +157,8 @@
     <ClCompile Include="gmux/gmux.cpp" />
     <ClCompile Include="gmux/server.cpp" />
     <ClCompile Include="gmux/client.cpp" />
+    <ClCompile Include="gmux/commands.cpp" />
+    <ClCompile Include="gmux/commandsupport.cpp" />
     <ClCompile Include="gmux/stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>

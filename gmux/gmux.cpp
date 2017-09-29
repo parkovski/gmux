@@ -3,7 +3,6 @@
 
 LRESULT CALLBACK KeyboardHook(int, WPARAM, LPARAM);
 
-
 void BindHandles() {
   freopen("CONIN$", "r", stdin);
   freopen("CONOUT$", "w", stdout);
@@ -17,7 +16,7 @@ void BindHandles() {
   std::wcin.clear();
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmd, int) {
   if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
     MessageBoxW(
       (HWND)nullptr,
@@ -31,7 +30,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
   BindHandles();
 
   std::wstring pipe_name = L"\\\\.\\pipe\\gmux-the-named-pipe";
-  int ret = ClientMain(pipe_name);
+  int argc;
+  auto argv = CommandLineToArgvW(cmd, &argc);
+  std::wstring args;
+  for (int i = 0; i < argc; ++i) {
+    args.append(argv[i]);
+    if (i < argc - 1) {
+      args.append(L" ");
+    }
+  }
+  int ret = ClientMain(pipe_name, args);
   if (ret == -1) {
     ret = ServerMain(pipe_name, hInstance);
   }

@@ -1,7 +1,7 @@
 #include "stdafx.h"
 #include "gmux.h"
 
-int ClientMain(std::wstring const &pipe_name) {
+int ClientMain(std::wstring const &pipe_name, std::wstring const &args) {
   HANDLE pipe;
   while (true) {
     pipe = CreateFileW(
@@ -37,7 +37,13 @@ int ClientMain(std::wstring const &pipe_name) {
     return 1;
   }
   DWORD bytesWritten;
-  WriteFile(pipe, L"Hi server!", 20, &bytesWritten, nullptr);
+  WriteFile(
+    pipe,
+    args.c_str(),
+    (DWORD)(args.size() * sizeof(wchar_t)),
+    &bytesWritten,
+    nullptr
+  );
 
   CloseHandle(pipe);
   return 0;
